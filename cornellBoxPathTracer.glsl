@@ -1,13 +1,15 @@
 #iChannel0 "self"
 
 #define PI 3.14159
+#define EPSILON 0.001
 #define N_BOUNCES 8
 #define MIN_RAY_DIST 0.001
 #define MAX_RAY_DIST 10000.0
-#define NUM_RENDERS_PER_FRAME 4
+#define NUM_RENDERS_PER_FRAME 2
 #define EXPOSURE 0.5
 #define ENABLE_AA true
 #define ENABLE_RUSSIAN_ROULETTE true
+#define ENABLE_BACKFACE_CULL_TRI false
 
 // Function to generate random numbers in a shader
 uint wang_hash(inout uint seed) {
@@ -85,6 +87,21 @@ struct Sphere {
     MaterialInfo mat;
 };
 
+struct Triangle {
+    vec3 v0;
+    vec3 v1;
+    vec3 v2;
+    MaterialInfo mat;
+};
+
+struct Quad {
+    vec3 v0;
+    vec3 v1;
+    vec3 v2;
+    vec3 v3;
+    MaterialInfo mat;
+};
+
 struct HitInfo {
     bool didHit;
     vec3 normal;
@@ -113,13 +130,55 @@ HitInfo sphereIntersect(vec3 rayOrigin, vec3 rayDir, Sphere sphere) {
 
     vec3 hitPoint = rayOrigin + rayDir*root;
     // Normal is the vector going from the center of the sphere to the hit point
+    // Dividing by sphere.radius normalizes the surface normal
     vec3 normal = (hitPoint - sphere.pos) / sphere.radius;
 
     return HitInfo(didHit, normal, hitPoint, sphere.mat);
 }
 
+HitInfo triangleIntersect(vec3 rayOrigin, vec3 rayDir, Triangle t) {
+    vec3 v0 = t.v0;
+    vec3 v1 = t.v1;
+    vec3 v2 = t.v2;
+    vec3 normal = normalize(cross(v1-v0, v2-v0));
+
+    // Flip vertex order and normal if needed
+    if (dot(normal, rayDir) > 0.0) {
+        normal *= -1.0;
+        v0 = t.v1;
+        v1 = t.v0;
+    }
+
+    vec3 e0 = v1-v0;
+    vec3 e1 = v2-v0;
+    
+    // Distance from ray to plane that contains triangle
+    float dist = -(dot(normal,rayOrigin) - dot(normal,v0)) / dot(normal,rayDir);
+    
+    // Hit point on plane
+    vec3 hitPoint = rayOrigin + rayDir * dist;
+    HitInfo didNotHit = HitInfo(false, vec3(0), vec3(0), t.mat);
+
+    // Test if hit point on plane is within triangle
+    if(dot(normal, cross(e0,hitPoint-v0)) < 0.0 ||
+       dot(normal, cross(e1,v2-hitPoint)) < 0.0 ||
+       dot(normal, cross(v2-v1,hitPoint-v1)) < 0.0) return didNotHit;   
+    
+    return HitInfo(true, normal, hitPoint, t.mat);
+}
+
+HitInfo quadIntersect(vec3 rayOrigin, vec3 rayDir, Quad q) {
+    HitInfo h;
+    Triangle t0 = Triangle(q.v0, q.v1, q.v2, q.mat);
+    Triangle t1 = Triangle(q.v1, q.v2, q.v3, q.mat);
+    h = triangleIntersect(rayOrigin, rayDir, t0);
+    if (h.didHit) return h;
+    h = triangleIntersect(rayOrigin, rayDir, t1);
+    return h;
+}
+
 vec3 scene(vec3 rayOrigin, vec3 rayDir, inout uint rngState) {
-    int nSpheres = 10;
+    int nSpheres = 3;
     Sphere spheres[16];
 
     MaterialInfo metalYellow = MaterialInfo(vec3(0.9, 0.9, 0.5), vec3(0), vec3(0.9), 0.1, 0.2);
@@ -127,10 +186,9 @@ vec3 scene(vec3 rayOrigin, vec3 rayDir, inout uint rngState) {
     MaterialInfo metalCyan  = metalYellow;
     metalMagenta.diffuse = vec3(0.9, 0.5, 0.9);
     metalMagenta.percentSpec = 0.3;
-    metalMagenta.roughness = 0.2;
     metalCyan.diffuse  = vec3(0.5, 0.9, 0.9);
 
-    MaterialInfo matteWhite = MaterialInfo(vec3(1.0), vec3(0), vec3(0), 0.0, 0.0);
+    MaterialInfo matteWhite = MaterialInfo(vec3(0.9), vec3(0), vec3(0), 0.0, 0.0);
     MaterialInfo matteRed   = matteWhite;
     MaterialInfo matteGreen = matteWhite;
     matteRed.diffuse   = vec3(1.0, 0.2, 0.2);
@@ -138,21 +196,31 @@ vec3 scene(vec3 rayOrigin, vec3 rayDir, inout uint rngState) {
 
     MaterialInfo lightSource = MaterialInfo(vec3(0), vec3(1.0, 0.9, 0.7), vec3(0), 0.0, 0.0);
 
-    // Light Sources
-    spheres[0] = Sphere(vec3(0, 18, 24), 10.0, lightSource);
-    spheres[1] = Sphere(vec3(0, 16, 6), 10.0, lightSource);
+    // Subjects
+    spheres[0] = Sphere(vec3(-6, -1.5, 20), 2.0, metalYellow);
+    spheres[1] = Sphere(vec3( 0, -1.5, 16), 2.0, metalMagenta);
+    spheres[2] = Sphere(vec3( 6, -1.5, 20), 2.0, metalCyan);
+
+    int nQuads = 6;
+    Quad quads[16];
+
+    // Corners of Cornell box
+    vec3 c1 = vec3(-9.0, -3.5, 0);
+    vec3 c2 = vec3( 9.0, -3.5, 0);
+    vec3 c3 = vec3(-9.0, -3.5, 30);
+    vec3 c4 = vec3( 9.0, -3.5, 30);
+    vec3 c5 = vec3(-9.0, 14, 0);
+    vec3 c6 = vec3( 9.0, 14, 0);
+    vec3 c7 = vec3(-9.0, 14, 30);
+    vec3 c8 = vec3( 9.0, 14, 30);
 
     // Walls
-    spheres[2] = Sphere(vec3(-108, 0, 30), 100.0, matteRed);
-    spheres[3] = Sphere(vec3( 108, 0, 30), 100.0, matteGreen);
-    spheres[4] = Sphere(vec3(0, 0,  136), 100.0, matteWhite);
-    spheres[5] = Sphere(vec3(0, -103, 30), 100.0, matteWhite);
-    spheres[6] = Sphere(vec3(0,  125.5, 30), 100.0, matteWhite);
-
-    // Subjects
-    spheres[7] = Sphere(vec3(-6, -1.6, 24), 2.0, metalYellow);
-    spheres[8] = Sphere(vec3( 0, -1.6, 20), 2.0, metalMagenta);
-    spheres[9] = Sphere(vec3( 6, -1.6, 24), 2.0, metalCyan);
+    quads[0] = Quad(c5, c6, c7, c8, lightSource); // Ceiling light
+    quads[1] = Quad(c1, c2, c3, c4, matteWhite);  // Floor
+    quads[2] = Quad(c1, c3, c5, c7, matteRed);    // Left
+    quads[3] = Quad(c2, c6, c4, c8, matteGreen);  // Right
+    quads[4] = Quad(c3, c4, c7, c8, matteWhite);  // Back
+    quads[5] = Quad(c1, c2, c5, c6, matteWhite); // Front light
 
     vec3 col = vec3(0);
     vec3 throughput = vec3(1);
@@ -167,6 +235,15 @@ vec3 scene(vec3 rayOrigin, vec3 rayDir, inout uint rngState) {
 
         for (int i=0; i<nSpheres; i++) {
             HitInfo h = sphereIntersect(rayOrigin, rayDir, spheres[i]);
+            float rayDist = length(rayOrigin-h.hitPoint);
+            if (h.didHit && rayDist < closestHit && rayDist > MIN_RAY_DIST) {
+                closestHit = rayDist;
+                hitInfo = h;
+            }
+        }
+
+        for (int i=0; i<nQuads; i++) {
+            HitInfo h = quadIntersect(rayOrigin, rayDir, quads[i]);
             float rayDist = length(rayOrigin-h.hitPoint);
             if (h.didHit && rayDist < closestHit && rayDist > MIN_RAY_DIST) {
                 closestHit = rayDist;
